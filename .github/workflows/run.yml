@@ -2,7 +2,7 @@ name: CIEN - Envio Automatico
 
 on:
   schedule:
-    - cron: '30 5 * * *'   # 12:30 AM Colombia (UTC-5)
+    - cron: '38 5 * * *'   # ~12:38 AM Colombia (UTC-5) — minuto impar para evitar colas
   workflow_dispatch:
     inputs:
       aliado_id:
@@ -60,8 +60,9 @@ jobs:
           GH_CDN_BASE:                      ${{ secrets.GH_CDN_BASE }}
           RUN_MODE:                         'github-actions'
           LOG_LEVEL:                        'info'
-          ALIADO_ID_FILTER:                 ${{ github.event.inputs.aliado_id }}
-          DRY_RUN:                          ${{ github.event.inputs.dry_run }}
+          # ✅ FIX: Valores por defecto para cuando corre por CRON (sin inputs)
+          ALIADO_ID_FILTER:                 ${{ github.event.inputs.aliado_id || '' }}
+          DRY_RUN:                          ${{ github.event.inputs.dry_run || 'false' }}
         run: node pipeline/run-once.js
 
       - name: 📋 Guardar log
