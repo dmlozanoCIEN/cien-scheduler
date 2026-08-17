@@ -2,7 +2,7 @@ name: CIEN - Envio Automatico
 
 on:
   schedule:
-    - cron: '38 5 * * *'   # ~12:38 AM Colombia (UTC-5) — minuto impar para evitar colas
+    - cron: '*/5 * * * *'   # ⚠️ SOLO PARA PROBAR — cada 5 minutos
   workflow_dispatch:
     inputs:
       aliado_id:
