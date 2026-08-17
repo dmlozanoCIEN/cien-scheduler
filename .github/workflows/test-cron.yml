@@ -1,0 +1,13 @@
+name: TEST CRON
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirmar que el CRON funciona
+        run: echo "CRON funcionando a las $(date)"
