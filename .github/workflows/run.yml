@@ -2,7 +2,7 @@ name: CIEN - Envio Automatico
 
 on:
   schedule:
-    - cron: '0 14 * * *'   # 🕗 9:00 AM Colombia (UTC-5)
+    - cron: '6 13 * * *'   # 🕗 8:06 AM Colombia (UTC-5) — fuera del pico de las :00
   workflow_dispatch:
     inputs:
       aliado_id:
