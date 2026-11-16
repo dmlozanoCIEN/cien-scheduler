@@ -1,17 +1,15 @@
 name: Export diario CIEN
 
 on:
-  schedule:
-    - cron: '55 4 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
-  exportar-y-subir:
+  export:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
 
     steps:
-      - name: Clonar repositorio
+      - name: Checkout repositorio
         uses: actions/checkout@v4
 
       - name: Configurar Python
@@ -19,13 +17,15 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Instalar dependencias de Python
-        run: pip install -r requirements.txt
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Instalar navegadores de Playwright
-        run: playwright install --with-deps chromium
+        run: python -m playwright install --with-deps chromium
 
-      - name: Ejecutar proceso de exportacion
+      - name: Ejecutar script de exportación
         env:
           PORTAL_USER: ${{ secrets.PORTAL_USER }}
           PORTAL_PASS: ${{ secrets.PORTAL_PASS }}
@@ -34,7 +34,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: python exportar.py
 
-      - name: Subir captura de error (solo si falla)
+      - name: Subir captura de error (si falla)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
