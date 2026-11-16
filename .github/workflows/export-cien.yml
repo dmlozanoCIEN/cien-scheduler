@@ -1,0 +1,43 @@
+name: Export diario CIEN
+
+on:
+  schedule:
+    - cron: '55 4 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  exportar-y-subir:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias de Python
+        run: pip install -r requirements.txt
+
+      - name: Instalar navegadores de Playwright
+        run: playwright install --with-deps chromium
+
+      - name: Ejecutar proceso de exportacion
+        env:
+          PORTAL_USER: ${{ secrets.PORTAL_USER }}
+          PORTAL_PASS: ${{ secrets.PORTAL_PASS }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python exportar.py
+
+      - name: Subir captura de error (solo si falla)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshot
+          path: descargas_cien/error_screenshot.png
+          retention-days: 5
