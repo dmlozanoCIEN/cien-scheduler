@@ -30,7 +30,6 @@ DOWNLOAD_SECTION = "#app > div > div > div > main > div > div.layout-content-wra
 
 CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-# Zona horaria de Bogotá: se usa tanto para el navegador como para nombrar archivos
 TZ_BOGOTA = ZoneInfo("America/Bogota")
 
 
@@ -95,7 +94,6 @@ def exportar_sesiones_del_dia(page):
         page.get_by_text("Export as Excel", exact=False).click(timeout=20000)
 
     download = download_info.value
-    # Fecha calculada en hora de Bogotá, no en hora del runner (UTC)
     fecha = datetime.now(TZ_BOGOTA).strftime("%Y-%m-%d")
     ruta_dia = os.path.join(CARPETA_TRABAJO, f"sesiones_{fecha}.xlsx")
     download.save_as(ruta_dia)
@@ -130,20 +128,64 @@ def fusionar_consolidado(page, ruta_dia):
     print("Esperando que el boton de descarga se habilite...")
     page.wait_for_selector("#btnMergeXlsx:not([disabled])", timeout=30000)
 
-    print("Descargando consolidado actualizado...")
+    print("Descargando consolidado fusionado (aun sin depurar)...")
     with page.expect_download(timeout=30000) as download_info:
         page.click("#btnMergeXlsx")
 
     download = download_info.value
     download.save_as(RUTA_CONSOLIDADO)
-    print(f"Consolidado actualizado: {RUTA_CONSOLIDADO}")
+    print(f"Consolidado fusionado guardado: {RUTA_CONSOLIDADO}")
+
+
+def depurar_consolidado(page):
+    """
+    Paso nuevo: aplica las reglas de depuracion (R1-R6) sobre el consolidado
+    recien fusionado: descarta sesiones de prueba, sesiones con STATUS
+    'Rejected', fusiona cargadores/locaciones duplicados, descarta sesiones
+    con consumo anomalo de medidor y completa ciudad/departamento faltantes.
+    Sobrescribe RUTA_CONSOLIDADO con la version ya depurada.
+    """
+    print(f"Abriendo herramienta para depurar: {DEPURADOR_URL}")
+    page.goto(DEPURADOR_URL)
+    page.wait_for_load_state("networkidle")
+
+    print("Seleccionando modo 'Depurar'...")
+    page.check("#modeSingle", force=True)
+
+    print("Cargando el consolidado fusionado para depurar...")
+    page.set_input_files("#file", RUTA_CONSOLIDADO)
+
+    print("Esperando que la depuracion se procese...")
+    try:
+        page.wait_for_selector("#results:not([hidden])", timeout=40000)
+        page.wait_for_selector("#kpis .kpi", timeout=10000)
+    except Exception:
+        error_box = page.locator("#fileErr")
+        if error_box.is_visible():
+            raise Exception(f"Error reportado en Depurar: {error_box.inner_text()}")
+        raise
+
+    error_box = page.locator("#fileErr")
+    if error_box.is_visible():
+        raise Exception(f"Error reportado en Depurar: {error_box.inner_text()}")
+
+    print("Esperando que la zona de descarga este disponible...")
+    page.wait_for_selector("#singleExports:not([hidden])", timeout=15000)
+
+    print("Descargando consolidado ya depurado (.xlsx)...")
+    with page.expect_download(timeout=30000) as download_info:
+        page.click("#btnXlsx")
+
+    download = download_info.value
+    download.save_as(RUTA_CONSOLIDADO)
+    print(f"Consolidado depurado guardado: {RUTA_CONSOLIDADO}")
 
 
 def dividir_por_estacion(page):
     print("Seleccionando modo 'Dividir por estacion'...")
     page.check("#modeSplit", force=True)
 
-    print("Cargando el consolidado actualizado para dividir...")
+    print("Cargando el consolidado ya depurado para dividir...")
     page.set_input_files("#file", RUTA_CONSOLIDADO)
 
     print("Esperando que la division se procese...")
@@ -227,6 +269,7 @@ def proceso_completo():
         try:
             ruta_dia = exportar_sesiones_del_dia(page)
             fusionar_consolidado(page, ruta_dia)
+            depurar_consolidado(page)
             ruta_zip = dividir_por_estacion(page)
         except Exception:
             page.screenshot(path=os.path.join(CARPETA_TRABAJO, "error_screenshot.png"))
