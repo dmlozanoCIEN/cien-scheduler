@@ -101,11 +101,20 @@ def exportar_sesiones_del_dia(page):
     return ruta_dia
 
 
-def fusionar_consolidado(page, ruta_dia):
+def abrir_depurador(page):
+    """
+    Navega UNA sola vez al depurador. Los tres pasos siguientes
+    (fusionar, depurar, dividir) se hacen cambiando de modo con
+    los radio buttons sobre esta misma pagina, sin volver a navegar,
+    para evitar bloqueos por navegaciones repetidas al mismo dominio.
+    """
     print(f"Abriendo herramienta: {DEPURADOR_URL}")
     page.goto(DEPURADOR_URL)
     page.wait_for_load_state("networkidle")
+    page.wait_for_selector("#modeSingle", timeout=30000)
 
+
+def fusionar_consolidado(page, ruta_dia):
     print("Seleccionando modo 'Fusionar consolidado + dia'...")
     page.check("#modeMerge", force=True)
 
@@ -139,18 +148,13 @@ def fusionar_consolidado(page, ruta_dia):
 
 def depurar_consolidado(page):
     """
-    Paso nuevo: aplica las reglas de depuracion (R1-R6) sobre el consolidado
-    recien fusionado: descarta sesiones de prueba, sesiones con STATUS
-    'Rejected', fusiona cargadores/locaciones duplicados, descarta sesiones
-    con consumo anomalo de medidor y completa ciudad/departamento faltantes.
-    Sobrescribe RUTA_CONSOLIDADO con la version ya depurada.
+    Cambia al modo 'Depurar' (#modeSingle) sobre la misma pagina ya
+    abierta (sin recargar), aplica las reglas R1-R6 y sobrescribe
+    RUTA_CONSOLIDADO con la version depurada.
     """
-    print(f"Abriendo herramienta para depurar: {DEPURADOR_URL}")
-    page.goto(DEPURADOR_URL)
-    page.wait_for_load_state("networkidle")
-
     print("Seleccionando modo 'Depurar'...")
     page.check("#modeSingle", force=True)
+    page.wait_for_timeout(500)
 
     print("Cargando el consolidado fusionado para depurar...")
     page.set_input_files("#file", RUTA_CONSOLIDADO)
@@ -184,6 +188,7 @@ def depurar_consolidado(page):
 def dividir_por_estacion(page):
     print("Seleccionando modo 'Dividir por estacion'...")
     page.check("#modeSplit", force=True)
+    page.wait_for_timeout(500)
 
     print("Cargando el consolidado ya depurado para dividir...")
     page.set_input_files("#file", RUTA_CONSOLIDADO)
@@ -268,6 +273,7 @@ def proceso_completo():
 
         try:
             ruta_dia = exportar_sesiones_del_dia(page)
+            abrir_depurador(page)
             fusionar_consolidado(page, ruta_dia)
             depurar_consolidado(page)
             ruta_zip = dividir_por_estacion(page)
