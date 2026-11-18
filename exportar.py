@@ -125,6 +125,20 @@ def conectar_diagnostico_js(page):
     )
 
 
+def asignar_archivo_y_disparar_change(page, selector, ruta_archivo):
+    """
+    Asigna un archivo a un input[type=file] y fuerza manualmente el
+    evento 'change', ya que Playwright puede no disparar el evento
+    si la ruta asignada es identica a una asignacion previa en el
+    mismo input, aunque el contenido del archivo en disco haya cambiado.
+    """
+    page.set_input_files(selector, ruta_archivo)
+    page.eval_on_selector(
+        selector,
+        "el => el.dispatchEvent(new Event('change', { bubbles: true }))"
+    )
+
+
 def hacer_login_con_reintento(page, intentos=3):
     for intento in range(1, intentos + 1):
         try:
@@ -179,10 +193,10 @@ def fusionar_consolidado(page, ruta_dia):
     page.wait_for_timeout(500)
 
     print("Cargando archivo A (consolidado existente)...")
-    page.set_input_files("#fileA", RUTA_CONSOLIDADO)
+    asignar_archivo_y_disparar_change(page, "#fileA", RUTA_CONSOLIDADO)
 
     print("Cargando archivo B (sesiones del dia)...")
-    page.set_input_files("#fileB", ruta_dia)
+    asignar_archivo_y_disparar_change(page, "#fileB", ruta_dia)
 
     print("Esperando que el boton 'Fusionar' se habilite...")
     page.wait_for_selector("#btnMerge:not([disabled])", timeout=TIMEOUT_PROCESO_GRANDE_MS)
@@ -209,7 +223,7 @@ def depurar_consolidado(page):
     page.wait_for_timeout(500)
 
     print("Cargando el consolidado fusionado para depurar...")
-    page.set_input_files("#file", RUTA_CONSOLIDADO)
+    asignar_archivo_y_disparar_change(page, "#file", RUTA_CONSOLIDADO)
 
     print("Esperando que la depuracion se procese...")
     page.wait_for_selector(
@@ -241,9 +255,9 @@ def dividir_por_estacion(page):
     page.wait_for_timeout(500)
 
     print("Cargando el consolidado ya depurado para dividir...")
-    page.set_input_files("#file", RUTA_CONSOLIDADO)
+    asignar_archivo_y_disparar_change(page, "#file", RUTA_CONSOLIDADO)
 
-    print("Esperando que la division se procese (puede tardar varios minutos en archivos grandes)...")
+    print("Esperando que la division se procese...")
     transcurrido_ms = 0
     resultado = None
 
@@ -252,7 +266,10 @@ def dividir_por_estacion(page):
             resultado = "exito"
             break
         if page.locator("#splitErr:not([hidden])").count() > 0:
-            resultado = "error"
+            resultado = "error_split"
+            break
+        if page.locator("#fileErr:not([hidden])").count() > 0:
+            resultado = "error_file"
             break
         page.wait_for_timeout(INTERVALO_POLL_MS)
         transcurrido_ms += INTERVALO_POLL_MS
@@ -262,14 +279,18 @@ def dividir_por_estacion(page):
         page.screenshot(path="error_screenshot.png")
         raise RuntimeError(
             f"Timeout: la division no termino en {TIMEOUT_DIVISION_TOTAL_MS // 1000}s. "
-            "Revisa error_screenshot.png; el archivo consolidado puede haber crecido "
-            "demasiado para procesarlo en el navegador."
+            "Revisa error_screenshot.png."
         )
 
-    if resultado == "error":
+    if resultado == "error_split":
         mensaje_error = page.locator("#splitErr").inner_text()
         page.screenshot(path="error_screenshot.png")
         raise RuntimeError(f"Error reportado por la herramienta al dividir: {mensaje_error}")
+
+    if resultado == "error_file":
+        mensaje_error = page.locator("#fileErr").inner_text()
+        page.screenshot(path="error_screenshot.png")
+        raise RuntimeError(f"Error al cargar el archivo para dividir: {mensaje_error}")
 
     print("Division completada. Descargando ZIP por estacion...")
     with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE_MS) as download_info:
