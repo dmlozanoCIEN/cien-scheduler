@@ -32,6 +32,10 @@ CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml
 
 TZ_BOGOTA = ZoneInfo("America/Bogota")
 
+# Timeouts mas generosos para los pasos que procesan el consolidado completo,
+# que crece dia a dia y puede tardar mas en el navegador conforme pasan los meses.
+TIMEOUT_PROCESO_GRANDE = 120000  # 2 minutos
+
 
 def get_r2_client():
     endpoint_url = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
@@ -56,6 +60,17 @@ def descargar_consolidado_desde_r2(s3):
             f"Debe existir un consolidado inicial subido manualmente antes del primer "
             f"run automatico. Detalle: {e}"
         )
+
+
+def conectar_diagnostico_js(page):
+    """
+    Captura errores y mensajes de consola del navegador y los imprime
+    en el log de Python/GitHub Actions. Esto es clave para diagnosticar
+    fallos silenciosos del depurador (por ejemplo, cuando prepareSplit()
+    falla internamente sin mostrar nada en #splitErr).
+    """
+    page.on("pageerror", lambda err: print(f"[JS ERROR] {err}"))
+    page.on("console", lambda msg: print(f"[JS CONSOLE:{msg.type}] {msg.text}") if msg.type in ("error", "warning") else None)
 
 
 def hacer_login_con_reintento(page, intentos=3):
@@ -105,8 +120,7 @@ def abrir_depurador(page):
     """
     Navega UNA sola vez al depurador. Los tres pasos siguientes
     (fusionar, depurar, dividir) se hacen cambiando de modo con
-    los radio buttons sobre esta misma pagina, sin volver a navegar,
-    para evitar bloqueos por navegaciones repetidas al mismo dominio.
+    los radio buttons sobre esta misma pagina, sin volver a navegar.
     """
     print(f"Abriendo herramienta: {DEPURADOR_URL}")
     page.goto(DEPURADOR_URL)
@@ -125,7 +139,7 @@ def fusionar_consolidado(page, ruta_dia):
     page.set_input_files("#fileB", ruta_dia)
 
     print("Esperando que el boton 'Fusionar' se habilite...")
-    page.wait_for_selector("#btnMerge:not([disabled])", timeout=30000)
+    page.wait_for_selector("#btnMerge:not([disabled])", timeout=TIMEOUT_PROCESO_GRANDE)
 
     error_box = page.locator("#mErr")
     if error_box.is_visible():
@@ -135,10 +149,10 @@ def fusionar_consolidado(page, ruta_dia):
     page.click("#btnMerge")
 
     print("Esperando que el boton de descarga se habilite...")
-    page.wait_for_selector("#btnMergeXlsx:not([disabled])", timeout=30000)
+    page.wait_for_selector("#btnMergeXlsx:not([disabled])", timeout=TIMEOUT_PROCESO_GRANDE)
 
     print("Descargando consolidado fusionado (aun sin depurar)...")
-    with page.expect_download(timeout=30000) as download_info:
+    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE) as download_info:
         page.click("#btnMergeXlsx")
 
     download = download_info.value
@@ -146,12 +160,26 @@ def fusionar_consolidado(page, ruta_dia):
     print(f"Consolidado fusionado guardado: {RUTA_CONSOLIDADO}")
 
 
+def esperar_exito_o_error(page, selector_exito, selector_error, timeout_ms):
+    """
+    Espera a que aparezca el selector de exito O el de error, lo que
+    ocurra primero. Evita esperar el timeout completo cuando la
+    herramienta SI reporta un error visible antes de tiempo.
+    Lanza excepcion con el texto del error si aparece #..Err.
+    Si no aparece ninguno de los dos antes del timeout, relanza
+    la excepcion original de Playwright (fallo silencioso real).
+    """
+    try:
+        page.wait_for_selector(f"{selector_exito}, {selector_error}:not([hidden])", timeout=timeout_ms)
+    except Exception:
+        raise
+
+    error_box = page.locator(selector_error)
+    if error_box.is_visible():
+        raise Exception(f"Error reportado por la herramienta ({selector_error}): {error_box.inner_text()}")
+
+
 def depurar_consolidado(page):
-    """
-    Cambia al modo 'Depurar' (#modeSingle) sobre la misma pagina ya
-    abierta (sin recargar), aplica las reglas R1-R6 y sobrescribe
-    RUTA_CONSOLIDADO con la version depurada.
-    """
     print("Seleccionando modo 'Depurar'...")
     page.check("#modeSingle", force=True)
     page.wait_for_timeout(500)
@@ -160,24 +188,14 @@ def depurar_consolidado(page):
     page.set_input_files("#file", RUTA_CONSOLIDADO)
 
     print("Esperando que la depuracion se procese...")
-    try:
-        page.wait_for_selector("#results:not([hidden])", timeout=40000)
-        page.wait_for_selector("#kpis .kpi", timeout=10000)
-    except Exception:
-        error_box = page.locator("#fileErr")
-        if error_box.is_visible():
-            raise Exception(f"Error reportado en Depurar: {error_box.inner_text()}")
-        raise
-
-    error_box = page.locator("#fileErr")
-    if error_box.is_visible():
-        raise Exception(f"Error reportado en Depurar: {error_box.inner_text()}")
+    esperar_exito_o_error(page, "#results:not([hidden])", "#fileErr", TIMEOUT_PROCESO_GRANDE)
+    page.wait_for_selector("#kpis .kpi", timeout=10000)
 
     print("Esperando que la zona de descarga este disponible...")
     page.wait_for_selector("#singleExports:not([hidden])", timeout=15000)
 
     print("Descargando consolidado ya depurado (.xlsx)...")
-    with page.expect_download(timeout=30000) as download_info:
+    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE) as download_info:
         page.click("#btnXlsx")
 
     download = download_info.value
@@ -193,21 +211,11 @@ def dividir_por_estacion(page):
     print("Cargando el consolidado ya depurado para dividir...")
     page.set_input_files("#file", RUTA_CONSOLIDADO)
 
-    print("Esperando que la division se procese...")
-    try:
-        page.wait_for_selector("#splitExports:not([hidden])", timeout=40000)
-    except Exception:
-        error_box = page.locator("#splitErr")
-        if error_box.is_visible():
-            raise Exception(f"Error reportado en Dividir por estacion: {error_box.inner_text()}")
-        raise
-
-    error_box = page.locator("#splitErr")
-    if error_box.is_visible():
-        raise Exception(f"Error reportado en Dividir por estacion: {error_box.inner_text()}")
+    print("Esperando que la division se procese (puede tardar varios minutos en archivos grandes)...")
+    esperar_exito_o_error(page, "#splitExports:not([hidden])", "#splitErr", TIMEOUT_PROCESO_GRANDE)
 
     print("Descargando ZIP por estaciones...")
-    with page.expect_download(timeout=30000) as download_info:
+    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE) as download_info:
         page.click("#btnSplitZip")
 
     download = download_info.value
@@ -270,6 +278,7 @@ def proceso_completo():
             locale="es-CO",
         )
         page = context.new_page()
+        conectar_diagnostico_js(page)
 
         try:
             ruta_dia = exportar_sesiones_del_dia(page)
