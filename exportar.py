@@ -1,5 +1,6 @@
 from playwright.sync_api import sync_playwright
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import os
 import zipfile
 import glob
@@ -28,6 +29,9 @@ CARPETA_ESTACIONES = os.path.join(CARPETA_TRABAJO, "estaciones")
 DOWNLOAD_SECTION = "#app > div > div > div > main > div > div.layout-content-wrapper > main > div > section:nth-child(1)"
 
 CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# Zona horaria de Bogotá: se usa tanto para el navegador como para nombrar archivos
+TZ_BOGOTA = ZoneInfo("America/Bogota")
 
 
 def get_r2_client():
@@ -91,7 +95,8 @@ def exportar_sesiones_del_dia(page):
         page.get_by_text("Export as Excel", exact=False).click(timeout=20000)
 
     download = download_info.value
-    fecha = datetime.now().strftime("%Y-%m-%d")
+    # Fecha calculada en hora de Bogotá, no en hora del runner (UTC)
+    fecha = datetime.now(TZ_BOGOTA).strftime("%Y-%m-%d")
     ruta_dia = os.path.join(CARPETA_TRABAJO, f"sesiones_{fecha}.xlsx")
     download.save_as(ruta_dia)
     print(f"Export del dia guardado: {ruta_dia}")
@@ -214,6 +219,8 @@ def proceso_completo():
         context = browser.new_context(
             accept_downloads=True,
             viewport={"width": 1366, "height": 900},
+            timezone_id="America/Bogota",
+            locale="es-CO",
         )
         page = context.new_page()
 
