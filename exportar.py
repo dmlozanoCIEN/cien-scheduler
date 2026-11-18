@@ -1,47 +1,71 @@
-from playwright.sync_api import sync_playwright
+import os
+import re
+import sys
+import zipfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import os
-import zipfile
-import glob
-import sys
+
 import boto3
-from botocore.config import Config
+from botocore.client import Config
+from playwright.sync_api import sync_playwright
 
 # ============================================================
-# ========== CONFIGURACIÓN (viene de GitHub Secrets) =========
+# CONFIGURACION
 # ============================================================
 
-PORTAL_USER = os.environ["PORTAL_USER"]
-PORTAL_PASS = os.environ["PORTAL_PASS"]
-
-R2_ACCOUNT_ID = os.environ["R2_ACCOUNT_ID"]
-R2_ACCESS_KEY_ID = os.environ["R2_ACCESS_KEY_ID"]
-R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
-R2_BUCKET = "cien-informes"
-
+PORTAL_LOGIN_URL = "https://cien-portal.web.app/login"
+PORTAL_SESSIONS_URL = "https://cien-portal.web.app/sessions/list?updated_at=today"
 DEPURADOR_URL = "http://app.cien.app/depurador-sesiones-cien.html"
 
-CARPETA_TRABAJO = os.path.join(os.getcwd(), "descargas_cien")
-RUTA_CONSOLIDADO = os.path.join(CARPETA_TRABAJO, "CIEN2026.xlsx")
+PORTAL_USER = os.environ.get("PORTAL_USER")
+PORTAL_PASS = os.environ.get("PORTAL_PASS")
+
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
+R2_BUCKET = os.environ.get("R2_BUCKET", "cien-informes")
+
+CARPETA_TRABAJO = "descargas_cien"
 CARPETA_ESTACIONES = os.path.join(CARPETA_TRABAJO, "estaciones")
-
-DOWNLOAD_SECTION = "#app > div > div > div > main > div > div.layout-content-wrapper > main > div > section:nth-child(1)"
-
-CONTENT_TYPE_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+RUTA_CONSOLIDADO = os.path.join(CARPETA_TRABAJO, "CIEN2026.xlsx")
 
 TZ_BOGOTA = ZoneInfo("America/Bogota")
 
-# Timeouts mas generosos para los pasos que procesan el consolidado completo,
-# que crece dia a dia y puede tardar mas en el navegador conforme pasan los meses.
-TIMEOUT_PROCESO_GRANDE = 120000  # 2 minutos
+MODO_HEADLESS = True
+TIMEOUT_LOGIN_MS = 45000
+TIMEOUT_EXPORT_MS = 30000
+TIMEOUT_PROCESO_GRANDE_MS = 120000
+TIMEOUT_DIVISION_TOTAL_MS = 300000
+INTERVALO_POLL_MS = 15000
+
+DOWNLOAD_SECTION = (
+    "#app > div > div > div > main > div > div.layout-content-wrapper "
+    "> main > div > section:nth-child(1)"
+)
 
 
-def get_r2_client():
-    endpoint_url = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+def validar_configuracion():
+    faltantes = []
+    if not PORTAL_USER:
+        faltantes.append("PORTAL_USER")
+    if not PORTAL_PASS:
+        faltantes.append("PORTAL_PASS")
+    if not R2_ACCOUNT_ID:
+        faltantes.append("R2_ACCOUNT_ID")
+    if not R2_ACCESS_KEY_ID:
+        faltantes.append("R2_ACCESS_KEY_ID")
+    if not R2_SECRET_ACCESS_KEY:
+        faltantes.append("R2_SECRET_ACCESS_KEY")
+    if faltantes:
+        print(f"ERROR: faltan variables de entorno/secrets: {', '.join(faltantes)}")
+        sys.exit(1)
+
+
+def cliente_r2():
+    endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
     return boto3.client(
         "s3",
-        endpoint_url=endpoint_url,
+        endpoint_url=endpoint,
         aws_access_key_id=R2_ACCESS_KEY_ID,
         aws_secret_access_key=R2_SECRET_ACCESS_KEY,
         config=Config(signature_version="s3v4"),
@@ -49,66 +73,92 @@ def get_r2_client():
     )
 
 
-def descargar_consolidado_desde_r2(s3):
+def descargar_consolidado_desde_r2():
     print("Descargando consolidado actual desde R2...")
-    try:
-        s3.download_file(R2_BUCKET, "CIEN2026.xlsx", RUTA_CONSOLIDADO)
-        print(f"Consolidado descargado desde R2: {RUTA_CONSOLIDADO}")
-    except Exception as e:
-        raise Exception(
-            f"No se pudo descargar CIEN2026.xlsx desde R2 (bucket '{R2_BUCKET}'). "
-            f"Debe existir un consolidado inicial subido manualmente antes del primer "
-            f"run automatico. Detalle: {e}"
+    os.makedirs(CARPETA_TRABAJO, exist_ok=True)
+    s3 = cliente_r2()
+    s3.download_file(R2_BUCKET, "CIEN2026.xlsx", RUTA_CONSOLIDADO)
+    print(f"Consolidado descargado desde R2: {RUTA_CONSOLIDADO}")
+
+
+def subir_a_r2():
+    print("Subiendo archivos a la raiz del bucket R2...")
+    s3 = cliente_r2()
+    archivos_a_subir = []
+
+    if os.path.exists(RUTA_CONSOLIDADO):
+        archivos_a_subir.append(RUTA_CONSOLIDADO)
+
+    if os.path.isdir(CARPETA_ESTACIONES):
+        for nombre in os.listdir(CARPETA_ESTACIONES):
+            if nombre.lower().endswith(".xlsx"):
+                archivos_a_subir.append(os.path.join(CARPETA_ESTACIONES, nombre))
+
+    for ruta in archivos_a_subir:
+        key = os.path.basename(ruta)
+        s3.upload_file(
+            ruta,
+            R2_BUCKET,
+            key,
+            ExtraArgs={
+                "ContentType": (
+                    "application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet"
+                )
+            },
         )
+        print(f"  Subido: {key}")
+
+    print("Subida a R2 completada.")
 
 
 def conectar_diagnostico_js(page):
-    """
-    Captura errores y mensajes de consola del navegador y los imprime
-    en el log de Python/GitHub Actions. Esto es clave para diagnosticar
-    fallos silenciosos del depurador (por ejemplo, cuando prepareSplit()
-    falla internamente sin mostrar nada en #splitErr).
-    """
-    page.on("pageerror", lambda err: print(f"[JS ERROR] {err}"))
-    page.on("console", lambda msg: print(f"[JS CONSOLE:{msg.type}] {msg.text}") if msg.type in ("error", "warning") else None)
+    page.on(
+        "pageerror",
+        lambda exc: print(f"[JS ERROR] {exc}"),
+    )
+    page.on(
+        "console",
+        lambda msg: print(f"[JS CONSOLE:{msg.type}] {msg.text}")
+        if msg.type == "error"
+        else None,
+    )
 
 
 def hacer_login_con_reintento(page, intentos=3):
     for intento in range(1, intentos + 1):
         try:
             print(f"Intento de login #{intento}...")
-            page.goto("https://cien-portal.web.app/login")
+            page.goto(PORTAL_LOGIN_URL, timeout=TIMEOUT_LOGIN_MS)
+            page.wait_for_selector("#input-0", timeout=TIMEOUT_LOGIN_MS)
             page.fill("#input-0", PORTAL_USER)
             page.fill("#input-2", PORTAL_PASS)
             page.get_by_role("button", name="LOGIN").click()
-            page.wait_for_url("**/dashboards/**", timeout=45000)
+            page.wait_for_url("**/dashboards/**", timeout=TIMEOUT_LOGIN_MS)
             print("Login exitoso.")
             return
         except Exception as e:
-            print(f"Fallo el intento {intento}: {e}")
+            print(f"Fallo intento de login #{intento}: {e}")
             if intento == intentos:
-                raise Exception("No se pudo iniciar sesion despues de varios intentos.")
+                page.screenshot(path="error_screenshot.png")
+                raise
             page.wait_for_timeout(5000)
 
 
 def exportar_sesiones_del_dia(page):
-    print("Abriendo portal...")
-    hacer_login_con_reintento(page)
-
     print("Navegando a la lista de sesiones...")
-    page.goto("https://cien-portal.web.app/sessions/list?updated_at=today")
+    page.goto(PORTAL_SESSIONS_URL, timeout=TIMEOUT_LOGIN_MS)
     page.wait_for_load_state("networkidle")
 
     print("Haciendo clic en el boton de descarga...")
     botones = page.locator(f"{DOWNLOAD_SECTION} button")
     botones.nth(2).click()
-    page.wait_for_timeout(2000)
 
     print("Haciendo clic en 'Export as Excel' y capturando la descarga...")
-    with page.expect_download(timeout=30000) as download_info:
-        page.get_by_text("Export as Excel", exact=False).click(timeout=20000)
-
+    with page.expect_download(timeout=TIMEOUT_EXPORT_MS) as download_info:
+        page.get_by_text("Export as Excel", exact=False).click(timeout=TIMEOUT_EXPORT_MS)
     download = download_info.value
+
     fecha = datetime.now(TZ_BOGOTA).strftime("%Y-%m-%d")
     ruta_dia = os.path.join(CARPETA_TRABAJO, f"sesiones_{fecha}.xlsx")
     download.save_as(ruta_dia)
@@ -117,13 +167,8 @@ def exportar_sesiones_del_dia(page):
 
 
 def abrir_depurador(page):
-    """
-    Navega UNA sola vez al depurador. Los tres pasos siguientes
-    (fusionar, depurar, dividir) se hacen cambiando de modo con
-    los radio buttons sobre esta misma pagina, sin volver a navegar.
-    """
     print(f"Abriendo herramienta: {DEPURADOR_URL}")
-    page.goto(DEPURADOR_URL)
+    page.goto(DEPURADOR_URL, timeout=TIMEOUT_LOGIN_MS)
     page.wait_for_load_state("networkidle")
     page.wait_for_selector("#modeSingle", timeout=30000)
 
@@ -131,6 +176,7 @@ def abrir_depurador(page):
 def fusionar_consolidado(page, ruta_dia):
     print("Seleccionando modo 'Fusionar consolidado + dia'...")
     page.check("#modeMerge", force=True)
+    page.wait_for_timeout(500)
 
     print("Cargando archivo A (consolidado existente)...")
     page.set_input_files("#fileA", RUTA_CONSOLIDADO)
@@ -139,44 +185,22 @@ def fusionar_consolidado(page, ruta_dia):
     page.set_input_files("#fileB", ruta_dia)
 
     print("Esperando que el boton 'Fusionar' se habilite...")
-    page.wait_for_selector("#btnMerge:not([disabled])", timeout=TIMEOUT_PROCESO_GRANDE)
-
-    error_box = page.locator("#mErr")
-    if error_box.is_visible():
-        raise Exception(f"Error reportado en Fusionar: {error_box.inner_text()}")
+    page.wait_for_selector("#btnMerge:not([disabled])", timeout=TIMEOUT_PROCESO_GRANDE_MS)
 
     print("Haciendo clic en 'Fusionar y renumerar'...")
     page.click("#btnMerge")
 
     print("Esperando que el boton de descarga se habilite...")
-    page.wait_for_selector("#btnMergeXlsx:not([disabled])", timeout=TIMEOUT_PROCESO_GRANDE)
+    page.wait_for_selector(
+        "#btnMergeXlsx:not([disabled])", timeout=TIMEOUT_PROCESO_GRANDE_MS
+    )
 
     print("Descargando consolidado fusionado (aun sin depurar)...")
-    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE) as download_info:
+    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE_MS) as download_info:
         page.click("#btnMergeXlsx")
-
     download = download_info.value
     download.save_as(RUTA_CONSOLIDADO)
     print(f"Consolidado fusionado guardado: {RUTA_CONSOLIDADO}")
-
-
-def esperar_exito_o_error(page, selector_exito, selector_error, timeout_ms):
-    """
-    Espera a que aparezca el selector de exito O el de error, lo que
-    ocurra primero. Evita esperar el timeout completo cuando la
-    herramienta SI reporta un error visible antes de tiempo.
-    Lanza excepcion con el texto del error si aparece #..Err.
-    Si no aparece ninguno de los dos antes del timeout, relanza
-    la excepcion original de Playwright (fallo silencioso real).
-    """
-    try:
-        page.wait_for_selector(f"{selector_exito}, {selector_error}:not([hidden])", timeout=timeout_ms)
-    except Exception:
-        raise
-
-    error_box = page.locator(selector_error)
-    if error_box.is_visible():
-        raise Exception(f"Error reportado por la herramienta ({selector_error}): {error_box.inner_text()}")
 
 
 def depurar_consolidado(page):
@@ -188,16 +212,24 @@ def depurar_consolidado(page):
     page.set_input_files("#file", RUTA_CONSOLIDADO)
 
     print("Esperando que la depuracion se procese...")
-    esperar_exito_o_error(page, "#results:not([hidden])", "#fileErr", TIMEOUT_PROCESO_GRANDE)
-    page.wait_for_selector("#kpis .kpi", timeout=10000)
+    page.wait_for_selector(
+        "#results:not([hidden]), #fileErr:not([hidden])",
+        timeout=TIMEOUT_PROCESO_GRANDE_MS,
+    )
+
+    if page.locator("#fileErr:not([hidden])").count() > 0:
+        mensaje_error = page.locator("#fileErr").inner_text()
+        page.screenshot(path="error_screenshot.png")
+        raise RuntimeError(f"Error reportado por la herramienta al depurar: {mensaje_error}")
 
     print("Esperando que la zona de descarga este disponible...")
-    page.wait_for_selector("#singleExports:not([hidden])", timeout=15000)
+    page.wait_for_selector(
+        "#singleExports:not([hidden])", timeout=TIMEOUT_PROCESO_GRANDE_MS
+    )
 
     print("Descargando consolidado ya depurado (.xlsx)...")
-    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE) as download_info:
+    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE_MS) as download_info:
         page.click("#btnXlsx")
-
     download = download_info.value
     download.save_as(RUTA_CONSOLIDADO)
     print(f"Consolidado depurado guardado: {RUTA_CONSOLIDADO}")
@@ -212,65 +244,56 @@ def dividir_por_estacion(page):
     page.set_input_files("#file", RUTA_CONSOLIDADO)
 
     print("Esperando que la division se procese (puede tardar varios minutos en archivos grandes)...")
-    esperar_exito_o_error(page, "#splitExports:not([hidden])", "#splitErr", TIMEOUT_PROCESO_GRANDE)
+    transcurrido_ms = 0
+    resultado = None
 
-    print("Descargando ZIP por estaciones...")
-    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE) as download_info:
+    while transcurrido_ms < TIMEOUT_DIVISION_TOTAL_MS:
+        if page.locator("#splitExports:not([hidden])").count() > 0:
+            resultado = "exito"
+            break
+        if page.locator("#splitErr:not([hidden])").count() > 0:
+            resultado = "error"
+            break
+        page.wait_for_timeout(INTERVALO_POLL_MS)
+        transcurrido_ms += INTERVALO_POLL_MS
+        print(f"  ...sigue procesando ({transcurrido_ms // 1000}s transcurridos)")
+
+    if resultado is None:
+        page.screenshot(path="error_screenshot.png")
+        raise RuntimeError(
+            f"Timeout: la division no termino en {TIMEOUT_DIVISION_TOTAL_MS // 1000}s. "
+            "Revisa error_screenshot.png; el archivo consolidado puede haber crecido "
+            "demasiado para procesarlo en el navegador."
+        )
+
+    if resultado == "error":
+        mensaje_error = page.locator("#splitErr").inner_text()
+        page.screenshot(path="error_screenshot.png")
+        raise RuntimeError(f"Error reportado por la herramienta al dividir: {mensaje_error}")
+
+    print("Division completada. Descargando ZIP por estacion...")
+    with page.expect_download(timeout=TIMEOUT_PROCESO_GRANDE_MS) as download_info:
         page.click("#btnSplitZip")
-
     download = download_info.value
     ruta_zip = os.path.join(CARPETA_TRABAJO, "CIEN2026-estaciones.zip")
     download.save_as(ruta_zip)
-    print(f"ZIP de estaciones descargado: {ruta_zip}")
+    print(f"ZIP de estaciones guardado: {ruta_zip}")
     return ruta_zip
 
 
-def descomprimir_estaciones(ruta_zip):
-    print(f"Descomprimiendo en: {CARPETA_ESTACIONES}")
+def descomprimir_zip(ruta_zip):
+    print(f"Descomprimiendo {ruta_zip}...")
     os.makedirs(CARPETA_ESTACIONES, exist_ok=True)
-
-    for f in glob.glob(f"{CARPETA_ESTACIONES}/*.xlsx"):
-        os.remove(f)
-
     with zipfile.ZipFile(ruta_zip, "r") as z:
         z.extractall(CARPETA_ESTACIONES)
-
-    print(f"Archivos por estacion descomprimidos en: {CARPETA_ESTACIONES}")
-
-
-def subir_a_r2(s3):
-    print(f"Subiendo consolidado a la raiz del bucket '{R2_BUCKET}'...")
-    s3.upload_file(
-        RUTA_CONSOLIDADO,
-        R2_BUCKET,
-        "CIEN2026.xlsx",
-        ExtraArgs={"ContentType": CONTENT_TYPE_XLSX},
-    )
-    print("CIEN2026.xlsx subido/actualizado en la raiz.")
-
-    archivos_estacion = glob.glob(f"{CARPETA_ESTACIONES}/*.xlsx")
-    print(f"Subiendo {len(archivos_estacion)} archivos de estaciones a la raiz del bucket...")
-    for ruta_archivo in archivos_estacion:
-        nombre = os.path.basename(ruta_archivo)
-        s3.upload_file(
-            ruta_archivo,
-            R2_BUCKET,
-            nombre,
-            ExtraArgs={"ContentType": CONTENT_TYPE_XLSX},
-        )
-        print(f"  -> {nombre} subido/actualizado")
-
-    print("Todos los archivos subidos/actualizados en la raiz del bucket.")
+    print(f"Archivos de estaciones extraidos en: {CARPETA_ESTACIONES}")
 
 
 def proceso_completo():
-    os.makedirs(CARPETA_TRABAJO, exist_ok=True)
-    s3 = get_r2_client()
-
-    descargar_consolidado_desde_r2(s3)
+    descargar_consolidado_desde_r2()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=MODO_HEADLESS)
         context = browser.new_context(
             accept_downloads=True,
             viewport={"width": 1366, "height": 900},
@@ -281,25 +304,32 @@ def proceso_completo():
         conectar_diagnostico_js(page)
 
         try:
+            print("Abriendo portal...")
+            hacer_login_con_reintento(page)
+
             ruta_dia = exportar_sesiones_del_dia(page)
+
             abrir_depurador(page)
             fusionar_consolidado(page, ruta_dia)
             depurar_consolidado(page)
             ruta_zip = dividir_por_estacion(page)
-        except Exception:
-            page.screenshot(path=os.path.join(CARPETA_TRABAJO, "error_screenshot.png"))
-            raise
-        finally:
-            browser.close()
+            descomprimir_zip(ruta_zip)
 
-    descomprimir_estaciones(ruta_zip)
-    subir_a_r2(s3)
-    print("Proceso completo finalizado con exito: archivos subidos a R2.")
+        except Exception as e:
+            print(f"ERROR: {e}")
+            try:
+                page.screenshot(path="error_screenshot.png")
+            except Exception:
+                pass
+            browser.close()
+            raise
+
+        browser.close()
+
+    subir_a_r2()
+    print("Proceso completo finalizado correctamente.")
 
 
 if __name__ == "__main__":
-    try:
-        proceso_completo()
-    except Exception as e:
-        print(f"ERROR: {e}")
-        sys.exit(1)
+    validar_configuracion()
+    proceso_completo()
